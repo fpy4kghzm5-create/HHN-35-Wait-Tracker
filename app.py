@@ -10,7 +10,7 @@ import streamlit as st
 TZ = ZoneInfo("America/New_York")
 
 # IMPORTANT: After creating your GitHub repository, replace YOUR_USERNAME below.
-REPO = "YOUR_USERNAME/HHN-35-Wait-Tracker"
+REPO = "fpy4kghzm5-create/HHN-35-Wait-Tracker"
 BRANCH = "main"
 DATA_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/data/waits.csv"
 
