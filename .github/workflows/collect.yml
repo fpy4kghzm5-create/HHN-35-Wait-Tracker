@@ -1,0 +1,36 @@
+name: Collect HHN wait times
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r collector_requirements.txt
+
+      - name: Collect wait times
+        run: python collector.py
+
+      - name: Save data
+        run: |
+          git config user.name "HHN Wait Tracker"
+          git config user.email "actions@github.com"
+          git add data/waits.csv
+          git diff --cached --quiet || git commit -m "Update HHN wait times"
+          git push
