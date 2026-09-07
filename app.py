@@ -1,4 +1,3 @@
-```python
 import io
 from zoneinfo import ZoneInfo
 
