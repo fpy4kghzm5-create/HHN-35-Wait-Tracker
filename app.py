@@ -36,15 +36,41 @@ def load_data():
 
 def excel_bytes(df):
     out = io.BytesIO()
+
+    # Make a copy so we don't modify the original dataframe
+    export_df = df.copy()
+
+    # Excel does not support timezone-aware datetimes
+    for col in export_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(export_df[col]):
+            export_df[col] = export_df[col].dt.tz_localize(None)
+
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Wait Times")
-        summary = (
-            df.dropna(subset=["wait_minutes"])
-            .groupby("house")["wait_minutes"]
-            .agg(Samples="count", Average="mean", Minimum="min", Maximum="max")
-            .round(1).reset_index()
+        export_df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Wait Times"
         )
-        summary.to_excel(writer, index=False, sheet_name="Summary")
+
+        summary = (
+            export_df.dropna(subset=["wait_minutes"])
+            .groupby("house")["wait_minutes"]
+            .agg(
+                Samples="count",
+                Average="mean",
+                Minimum="min",
+                Maximum="max"
+            )
+            .round(1)
+            .reset_index()
+        )
+
+        summary.to_excel(
+            writer,
+            index=False,
+            sheet_name="Summary"
+        )
+
     return out.getvalue()
 
 st.title("🎃 HHN 35 Wait Times")
