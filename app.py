@@ -1,3 +1,4 @@
+```python
 import io
 from zoneinfo import ZoneInfo
 
@@ -131,7 +132,7 @@ def excel_bytes(df):
 # ---------------------------------------------------------
 
 st.title("🎃 HHN 35 Wait Times")
-st.caption("Universal Orlando • Automatic 10-minute tracking")
+st.caption("Universal Orlando • Automatic 5-minute tracking")
 
 df = load_data()
 
@@ -322,7 +323,8 @@ with c2:
 # ---------------------------------------------------------
 
 st.caption(
-    "Data is collected by GitHub Actions every 10 minutes "
+    "Data is collected by GitHub Actions every 5 minutes "
     "and stored in this project's GitHub repository. "
     "The website checks for new data every 30 seconds."
 )
+```
