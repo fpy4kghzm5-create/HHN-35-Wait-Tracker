@@ -1,4 +1,5 @@
 import io
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -23,23 +24,80 @@ HOUSES = [
     "Stranger Things 5",
 ]
 
+SEASON_START = datetime(2026, 8, 29, tzinfo=TZ)
+SEASON_END = datetime(2026, 11, 1, 23, 59, 59, tzinfo=TZ)
+
+OPEN_TIME = time(14, 0)
+CLOSE_TIME = time(3, 0)
+
+
 st.set_page_config(
     page_title="HHN 35 Wait Times",
     page_icon="🎃",
     layout="wide",
 )
 
-# Automatically refresh the Streamlit page every 30 seconds.
+
+# ---------------------------------------------------------
+# AUTOMATIC WEBSITE REFRESH
+# ---------------------------------------------------------
+
 try:
     from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=30_000, key="wait_tracker_refresh")
+
+    st_autorefresh(
+        interval=30_000,
+        key="wait_tracker_refresh"
+    )
+
 except ImportError:
     pass
 
 
+# ---------------------------------------------------------
+# HHN OPERATING HOURS
+# ---------------------------------------------------------
+
+def is_hhn_open(now=None):
+    """
+    HHN season:
+        August 29, 2026 through November 1, 2026
+
+    Daily operating window:
+        2:00 PM through 2:59 AM
+
+    At 3:00 AM the tracker considers HHN closed.
+    """
+
+    if now is None:
+        now = datetime.now(TZ)
+
+    # Check season dates.
+    if now < SEASON_START or now > SEASON_END:
+        return False
+
+    current_time = now.time()
+
+    # 2:00 PM through 11:59 PM
+    if current_time >= OPEN_TIME:
+        return True
+
+    # Midnight through 2:59 AM
+    if current_time < CLOSE_TIME:
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------
+# LOAD DATA
+# ---------------------------------------------------------
+
 @st.cache_data(ttl=30)
 def load_data():
+
     try:
+
         df = pd.read_csv(DATA_URL)
 
         if df.empty:
@@ -55,7 +113,6 @@ def load_data():
             errors="coerce"
         )
 
-        # Make sure status is always available.
         if "status" not in df.columns:
             df["status"] = ""
 
@@ -69,6 +126,7 @@ def load_data():
         return df
 
     except Exception:
+
         return pd.DataFrame(
             columns=[
                 "recorded_at",
@@ -79,32 +137,50 @@ def load_data():
         )
 
 
+# ---------------------------------------------------------
+# FORMAT TIMESTAMP
+# ---------------------------------------------------------
+
 def format_timestamp(value):
-    """Format timestamps as MM/DD/YYYY H:MM AM/PM."""
+    """
+    Display timestamps as:
+    MM/DD/YYYY H:MM AM/PM
+    """
+
     if pd.isna(value):
         return ""
 
-    return value.strftime("%m/%d/%Y %-I:%M %p")
+    return value.strftime(
+        "%m/%d/%Y %-I:%M %p"
+    )
 
+
+# ---------------------------------------------------------
+# EXPORT DATA
+# ---------------------------------------------------------
 
 def export_dataframe(df):
-    """Create a copy with 12-hour timestamps for CSV/Excel downloads."""
+
     export_df = df.copy()
 
-    export_df["recorded_at"] = export_df["recorded_at"].apply(
-        format_timestamp
+    export_df["recorded_at"] = (
+        export_df["recorded_at"]
+        .apply(format_timestamp)
     )
 
     return export_df
 
 
 def excel_bytes(df):
+
     out = io.BytesIO()
 
-    # Create a copy specifically for exporting.
     export_df = export_dataframe(df)
 
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        out,
+        engine="openpyxl"
+    ) as writer:
 
         # Full wait-time data
         export_df.to_excel(
@@ -116,7 +192,9 @@ def excel_bytes(df):
         # Summary data
         summary = (
             df
-            .dropna(subset=["wait_minutes"])
+            .dropna(
+                subset=["wait_minutes"]
+            )
             .groupby("house")["wait_minutes"]
             .agg(
                 Samples="count",
@@ -142,15 +220,43 @@ def excel_bytes(df):
 # ---------------------------------------------------------
 
 st.title("🎃 HHN 35 Wait Times")
-st.caption("Universal Orlando • Automatic 5-minute tracking")
+
+st.caption(
+    "Universal Orlando • Automatic 5-minute tracking"
+)
+
+
+# ---------------------------------------------------------
+# CURRENT TIME / OPEN STATUS
+# ---------------------------------------------------------
+
+now = datetime.now(TZ)
+
+if is_hhn_open(now):
+
+    st.success(
+        f"🎃 HHN is OPEN • "
+        f"{now.strftime('%-I:%M %p')}"
+    )
+
+else:
+
+    st.info(
+        f"🔒 HHN is CLOSED • "
+        f"{now.strftime('%-I:%M %p')}"
+    )
+
 
 df = load_data()
 
+
 if df.empty:
+
     st.warning(
         "No wait-time data has been collected yet. "
         "Check the GitHub Actions workflow."
     )
+
     st.stop()
 
 
@@ -158,80 +264,141 @@ if df.empty:
 # CURRENT WAIT TIMES
 # ---------------------------------------------------------
 
-latest_time = df["recorded_at"].max()
-
-latest = df[
-    df["recorded_at"] == latest_time
-].copy()
-
-if pd.notna(latest_time):
-    display_time = latest_time.strftime("%-I:%M %p")
-else:
-    display_time = "—"
-
-st.markdown(f"### Live waits · {display_time}")
+st.subheader("🎢 Current wait times")
 
 
-# Build cards for every house.
-cards = []
+# Outside HHN hours, show Closed instead of the last
+# recorded wait time.
+if not is_hhn_open(now):
 
-for house in HOUSES:
+    display_time = now.strftime("%-I:%M %p")
 
-    row = latest[
-        latest["house"].astype(str).str.strip() == house
-    ]
-
-    if row.empty:
-        cards.append(
-            (house, "Not found", "not found")
-        )
-        continue
-
-    r = row.iloc[0]
-
-    # Get wait time.
-    if pd.isna(r["wait_minutes"]):
-        wait = None
-    else:
-        wait = int(r["wait_minutes"])
-
-    # Get status.
-    status = str(
-        r.get("status", "")
-    ).strip().lower()
-
-    # -----------------------------------------------------
-    # IMPORTANT:
-    # Status takes priority over a 0-minute wait.
-    # This prevents delayed houses from showing "0 min".
-    # -----------------------------------------------------
-
-    if status in ["delayed", "delay"]:
-        display_value = "Delayed"
-
-    elif status in ["closed", "close"]:
-        display_value = "Closed"
-
-    elif wait is not None:
-        display_value = f"{wait} min"
-
-    elif status:
-        display_value = status.title()
-
-    else:
-        display_value = "—"
-
-    cards.append(
-        (house, display_value, status)
+    st.markdown(
+        f"### 🔒 Live waits · Closed · {display_time}"
     )
 
+    cards = []
 
-# Display five houses per row.
-for start in range(0, len(cards), 5):
+    for house in HOUSES:
+
+        cards.append(
+            (house, "Closed", "closed")
+        )
+
+else:
+
+    latest_time = df["recorded_at"].max()
+
+    latest = df[
+        df["recorded_at"] == latest_time
+    ].copy()
+
+    if pd.notna(latest_time):
+
+        display_time = latest_time.strftime(
+            "%-I:%M %p"
+        )
+
+    else:
+
+        display_time = "—"
+
+    st.markdown(
+        f"### Live waits · {display_time}"
+    )
+
+    cards = []
+
+    for house in HOUSES:
+
+        row = latest[
+            latest["house"]
+            .astype(str)
+            .str.strip()
+            == house
+        ]
+
+        if row.empty:
+
+            cards.append(
+                (house, "Not found", "not found")
+            )
+
+            continue
+
+        r = row.iloc[0]
+
+        # Get wait time.
+        if pd.isna(r["wait_minutes"]):
+
+            wait = None
+
+        else:
+
+            wait = int(
+                r["wait_minutes"]
+            )
+
+        # Get status.
+        status = str(
+            r.get("status", "")
+        ).strip().lower()
+
+        # Status takes priority over wait time.
+        if status in [
+            "delayed",
+            "delay"
+        ]:
+
+            display_value = "Delayed"
+
+        elif status in [
+            "closed",
+            "close"
+        ]:
+
+            display_value = "Closed"
+
+        elif wait is not None:
+
+            display_value = (
+                f"{wait} min"
+            )
+
+        elif status:
+
+            display_value = status.title()
+
+        else:
+
+            display_value = "—"
+
+        cards.append(
+            (
+                house,
+                display_value,
+                status
+            )
+        )
+
+
+# ---------------------------------------------------------
+# HOUSE CARDS
+# ---------------------------------------------------------
+
+for start in range(
+    0,
+    len(cards),
+    5
+):
 
     cols = st.columns(5)
 
-    for col, (house, display_value, status) in zip(
+    for col, (
+        house,
+        display_value,
+        status
+    ) in zip(
         cols,
         cards[start:start + 5]
     ):
@@ -253,20 +420,30 @@ st.divider()
 
 st.subheader("📈 Wait times tonight")
 
-pivot = (
-    df.pivot_table(
-        index="recorded_at",
-        columns="house",
-        values="wait_minutes",
-        aggfunc="last",
-    )
-    .sort_index()
-)
+if is_hhn_open(now):
 
-st.line_chart(
-    pivot,
-    height=500
-)
+    pivot = (
+        df
+        .pivot_table(
+            index="recorded_at",
+            columns="house",
+            values="wait_minutes",
+            aggfunc="last",
+        )
+        .sort_index()
+    )
+
+    st.line_chart(
+        pivot,
+        height=500
+    )
+
+else:
+
+    st.info(
+        "Wait-time history will be shown here "
+        "when HHN is open."
+    )
 
 
 # ---------------------------------------------------------
@@ -277,7 +454,9 @@ st.subheader("🔥 House rankings")
 
 summary = (
     df
-    .dropna(subset=["wait_minutes"])
+    .dropna(
+        subset=["wait_minutes"]
+    )
     .groupby("house")["wait_minutes"]
     .agg(
         Samples="count",
@@ -304,16 +483,18 @@ st.dataframe(
 
 st.subheader("📥 Export")
 
-# Create a version with 12-hour timestamps for downloads.
 download_df = export_dataframe(df)
 
 c1, c2 = st.columns(2)
+
 
 with c1:
 
     st.download_button(
         "Download CSV",
-        download_df.to_csv(index=False).encode(),
+        download_df
+        .to_csv(index=False)
+        .encode(),
         "HHN_35_wait_times.csv",
         "text/csv",
         use_container_width=True,
@@ -337,6 +518,8 @@ with c2:
 
 st.caption(
     "Data is collected by GitHub Actions every 5 minutes "
-    "and stored in this project's GitHub repository. "
-    "The website checks for new data every 30 seconds."
+    "during HHN operating hours and stored in this "
+    "project's GitHub repository. "
+    "The website checks for new data every 30 seconds. "
+    "HHN season: August 29 – November 1, 2026."
 )
