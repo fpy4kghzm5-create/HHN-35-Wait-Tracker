@@ -79,19 +79,30 @@ def load_data():
         )
 
 
+def format_timestamp(value):
+    """Format timestamps as MM/DD/YYYY H:MM AM/PM."""
+    if pd.isna(value):
+        return ""
+
+    return value.strftime("%m/%d/%Y %-I:%M %p")
+
+
+def export_dataframe(df):
+    """Create a copy with 12-hour timestamps for CSV/Excel downloads."""
+    export_df = df.copy()
+
+    export_df["recorded_at"] = export_df["recorded_at"].apply(
+        format_timestamp
+    )
+
+    return export_df
+
+
 def excel_bytes(df):
     out = io.BytesIO()
 
-    # Work with a copy so the original dataframe is not changed.
-    export_df = df.copy()
-
-    # Excel cannot store timezone-aware datetime values.
-    for col in export_df.columns:
-        if pd.api.types.is_datetime64_any_dtype(export_df[col]):
-            try:
-                export_df[col] = export_df[col].dt.tz_localize(None)
-            except TypeError:
-                pass
+    # Create a copy specifically for exporting.
+    export_df = export_dataframe(df)
 
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
 
@@ -104,7 +115,7 @@ def excel_bytes(df):
 
         # Summary data
         summary = (
-            export_df
+            df
             .dropna(subset=["wait_minutes"])
             .groupby("house")["wait_minutes"]
             .agg(
@@ -154,7 +165,7 @@ latest = df[
 ].copy()
 
 if pd.notna(latest_time):
-    display_time = latest_time.strftime("%I:%M %p")
+    display_time = latest_time.strftime("%-I:%M %p")
 else:
     display_time = "—"
 
@@ -293,13 +304,16 @@ st.dataframe(
 
 st.subheader("📥 Export")
 
+# Create a version with 12-hour timestamps for downloads.
+download_df = export_dataframe(df)
+
 c1, c2 = st.columns(2)
 
 with c1:
 
     st.download_button(
         "Download CSV",
-        df.to_csv(index=False).encode(),
+        download_df.to_csv(index=False).encode(),
         "HHN_35_wait_times.csv",
         "text/csv",
         use_container_width=True,
