@@ -326,4 +326,3 @@ st.caption(
     "and stored in this project's GitHub repository. "
     "The website checks for new data every 30 seconds."
 )
-```
