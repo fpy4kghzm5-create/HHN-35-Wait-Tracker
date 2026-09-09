@@ -1,5 +1,5 @@
 import io
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -63,30 +63,71 @@ def is_hhn_open(now=None):
     HHN season:
         August 29, 2026 through November 1, 2026
 
+    Operating nights:
+        Wednesday through Sunday
+
     Daily operating window:
         2:00 PM through 2:59 AM
 
-    At 3:00 AM the tracker considers HHN closed.
+    Monday and Tuesday are always considered closed.
+
+    After midnight, the time belongs to the previous night's
+    operating event. This means early Thursday morning, for
+    example, is still part of Wednesday night's event.
     """
 
     if now is None:
         now = datetime.now(TZ)
 
-    # Check season dates.
     if now < SEASON_START or now > SEASON_END:
         return False
 
     current_time = now.time()
 
-    # 2:00 PM through 11:59 PM
-    if current_time >= OPEN_TIME:
-        return True
+    # 3:00 AM through 1:59 PM is closed.
+    if current_time >= CLOSE_TIME and current_time < OPEN_TIME:
+        return False
 
-    # Midnight through 2:59 AM
+    # 12:00 AM through 2:59 AM belongs to the previous event night.
     if current_time < CLOSE_TIME:
-        return True
+        event_date = (now - timedelta(days=1)).date()
+    else:
+        event_date = now.date()
 
-    return False
+    # Monday = 0, Tuesday = 1.
+    if event_date.weekday() in (0, 1):
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------
+# EVENT DATE
+# ---------------------------------------------------------
+
+def get_event_date(value):
+    """
+    Assign each timestamp to its HHN event night.
+
+    Example:
+        Wednesday 11:30 PM -> Wednesday
+        Thursday 12:15 AM -> Wednesday
+        Thursday 2:30 AM -> Wednesday
+        Thursday 6:00 AM -> Thursday
+    """
+
+    if pd.isna(value):
+        return None
+
+    timestamp = value
+
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(TZ)
+
+    if timestamp.timetz().replace(tzinfo=None) < CLOSE_TIME:
+        return (timestamp - timedelta(days=1)).date()
+
+    return timestamp.date()
 
 
 # ---------------------------------------------------------
@@ -123,6 +164,23 @@ def load_data():
             .str.strip()
         )
 
+        # Use an existing event_date column when the collector has
+        # already supplied one. Otherwise calculate it from recorded_at.
+        if "event_date" not in df.columns:
+            df["event_date"] = df["recorded_at"].apply(get_event_date)
+
+        else:
+            calculated_dates = df["recorded_at"].apply(get_event_date)
+            supplied_dates = pd.to_datetime(
+                df["event_date"],
+                errors="coerce"
+            ).dt.date
+
+            df["event_date"] = supplied_dates.where(
+                supplied_dates.notna(),
+                calculated_dates
+            )
+
         return df
 
     except Exception:
@@ -133,6 +191,7 @@ def load_data():
                 "house",
                 "wait_minutes",
                 "status",
+                "event_date",
             ]
         )
 
@@ -241,9 +300,19 @@ if is_hhn_open(now):
 
 else:
 
+    if now.weekday() == 0:
+        closed_reason = "Monday — HHN does not operate tonight"
+    elif now.weekday() == 1:
+        closed_reason = "Tuesday — HHN does not operate tonight"
+    elif now.time() < CLOSE_TIME:
+        closed_reason = "HHN has closed for the night"
+    else:
+        closed_reason = "HHN is outside operating hours"
+
     st.info(
         f"🔒 HHN is CLOSED • "
-        f"{now.strftime('%-I:%M %p')}"
+        f"{now.strftime('%-I:%M %p')} • "
+        f"{closed_reason}"
     )
 
 
@@ -287,10 +356,22 @@ if not is_hhn_open(now):
 
 else:
 
-    latest_time = df["recorded_at"].max()
+    # Determine which HHN event night is currently active.
+    current_event_date = get_event_date(
+        pd.Timestamp(now)
+    )
 
-    latest = df[
-        df["recorded_at"] == latest_time
+    event_df = df[
+        df["event_date"] == current_event_date
+    ].copy()
+
+    if event_df.empty:
+        event_df = df.copy()
+
+    latest_time = event_df["recorded_at"].max()
+
+    latest = event_df[
+        event_df["recorded_at"] == latest_time
     ].copy()
 
     if pd.notna(latest_time):
@@ -422,8 +503,16 @@ st.subheader("📈 Wait times tonight")
 
 if is_hhn_open(now):
 
+    current_event_date = get_event_date(
+        pd.Timestamp(now)
+    )
+
+    chart_df = df[
+        df["event_date"] == current_event_date
+    ].copy()
+
     pivot = (
-        df
+        chart_df
         .pivot_table(
             index="recorded_at",
             columns="house",
@@ -510,8 +599,6 @@ with c2:
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
-
 # ---------------------------------------------------------
 # FOOTER
 # ---------------------------------------------------------
@@ -523,3 +610,5 @@ st.caption(
     "The website checks for new data every 30 seconds. "
     "HHN season: August 29 – November 1, 2026."
 )
+
+st.caption("Powered by Queue-Times.com.")
