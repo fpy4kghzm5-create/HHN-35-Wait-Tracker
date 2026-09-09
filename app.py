@@ -144,9 +144,11 @@ def load_data():
         if df.empty:
             return df
 
-        df["recorded_at"] = pd.to_datetime(
-            df["recorded_at"],
-            errors="coerce"
+      pd.to_datetime(
+    df["recorded_at"],
+    format="mixed",
+    errors="coerce"
+)
         )
 
         df["wait_minutes"] = pd.to_numeric(
