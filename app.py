@@ -1,17 +1,21 @@
+import csv
 import io
-from datetime import datetime, timedelta
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 import streamlit as st
 
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "hhn_wait_times.db"
 TZ = ZoneInfo("America/New_York")
+API_URL = "https://queue-times.com/parks/65/queue_times.json"
 
-REPO = "fpy4kghzm5-create/HHN-35-Wait-Tracker"
-BRANCH = "main"
-DATA_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/data/waits.csv"
-
+# Update these names if Queue-Times uses slightly different attraction names.
 HOUSE_MATCHES = {
     "Jack & Oddfellow": ["Jack & Oddfellow"],
     "Sinners": ["Sinners"],
@@ -25,114 +29,130 @@ HOUSE_MATCHES = {
     "Cybergoria": ["Cybergoria"],
 }
 
-HOUSES = list(HOUSE_MATCHES.keys())
-CLOSED_WEEKDAYS = {0, 1}  # Monday and Tuesday
-AFTER_MIDNIGHT_CUTOFF_HOUR = 6
-
-
 st.set_page_config(
     page_title="HHN 35 Wait-Time Tracker",
     page_icon="🎃",
     layout="wide",
 )
 
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS waits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at TEXT NOT NULL,
+            house TEXT NOT NULL,
+            wait_minutes INTEGER,
+            is_open INTEGER NOT NULL,
+            source_updated_at TEXT
+        )
+    """)
+    conn.commit()
+    return conn
 
-def event_date_for(dt):
-    """Assign after-midnight records (before 6 AM) to the previous HHN night."""
-    local_dt = dt.astimezone(TZ) if dt.tzinfo else dt.replace(tzinfo=TZ)
-    if local_dt.hour < AFTER_MIDNIGHT_CUTOFF_HOUR:
-        local_dt = local_dt - timedelta(days=1)
-    return local_dt.date().isoformat()
+def fetch_queue_times():
+    r = requests.get(API_URL, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
+def normalize_name(name):
+    return " ".join(str(name).lower().replace(":", " ").split())
 
-def today_local():
-    return datetime.now(TZ)
+def find_houses(payload):
+    rides = []
+    for land in payload.get("lands", []):
+        for ride in land.get("rides", []):
+            rides.append(ride)
 
+    results = {}
+    for label, patterns in HOUSE_MATCHES.items():
+        for ride in rides:
+            n = normalize_name(ride.get("name", ""))
+            if any(normalize_name(p) in n for p in patterns):
+                results[label] = ride
+                break
+    return results
 
-def tonight_event_date():
-    return event_date_for(today_local())
+def collect_snapshot():
+    payload = fetch_queue_times()
+    matches = find_houses(payload)
+    now = datetime.now(TZ).isoformat(timespec="seconds")
 
+    conn = db()
+    rows = []
+    for house in HOUSE_MATCHES:
+        ride = matches.get(house)
+        if ride is None:
+            rows.append((now, house, None, 0, None))
+        else:
+            wait = ride.get("wait_time")
+            is_open = int(bool(ride.get("is_open")))
+            source_updated = ride.get("last_updated")
+            rows.append((now, house, wait, is_open, source_updated))
 
-def is_closed_today():
-    return today_local().weekday() in CLOSED_WEEKDAYS
+    conn.executemany("""
+        INSERT INTO waits
+        (recorded_at, house, wait_minutes, is_open, source_updated_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, rows)
+    conn.commit()
+    conn.close()
+    return len(matches)
 
-
-@st.cache_data(ttl=30)
 def load_data():
-    columns = ["recorded_at", "event_date", "house", "wait_minutes", "status"]
-    try:
-        df = pd.read_csv(DATA_URL)
-    except Exception:
-        return pd.DataFrame(columns=columns)
-
-    if df.empty:
-        return pd.DataFrame(columns=columns)
-
-    # Support the older four-column CSV while it is being phased out.
-    if "status" not in df.columns:
-        df["status"] = ""
-    if "event_date" not in df.columns:
-        parsed = pd.to_datetime(df["recorded_at"], errors="coerce")
-        df["event_date"] = [
-            event_date_for(x.to_pydatetime()) if pd.notna(x) else ""
-            for x in parsed
-        ]
-
-    df["recorded_at"] = pd.to_datetime(df["recorded_at"], errors="coerce")
-    df["wait_minutes"] = pd.to_numeric(df["wait_minutes"], errors="coerce")
-    df["event_date"] = df["event_date"].astype(str)
-
-    # Monday/Tuesday should never be treated as HHN operating-night data.
-    parsed_event = pd.to_datetime(df["event_date"], errors="coerce")
-    df = df[parsed_event.dt.weekday.isin([2, 3, 4, 5, 6])].copy()
-
-    return df[columns].sort_values("recorded_at")
-
+    conn = db()
+    df = pd.read_sql_query(
+        "SELECT recorded_at, house, wait_minutes, is_open, source_updated_at FROM waits ORDER BY recorded_at",
+        conn,
+    )
+    conn.close()
+    if not df.empty:
+        df["recorded_at"] = pd.to_datetime(df["recorded_at"])
+    return df
 
 def export_csv(df):
     return df.to_csv(index=False).encode("utf-8")
 
-
 def export_xlsx(df):
     out = io.BytesIO()
+
+    # Excel/openpyxl does not support timezone-aware datetimes.
+    # Keep the displayed timestamps intact by exporting them as text.
+    excel_df = df.copy()
+    if "recorded_at" in excel_df.columns:
+        excel_df["recorded_at"] = excel_df["recorded_at"].astype(str)
+
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Wait Times")
+        excel_df.to_excel(writer, index=False, sheet_name="Wait Times")
         summary = (
             df.dropna(subset=["wait_minutes"])
-            .groupby("house")["wait_minutes"]
-            .agg(["count", "mean", "min", "max"])
-            .reset_index()
+              .groupby("house")["wait_minutes"]
+              .agg(["count", "mean", "min", "max"])
+              .reset_index()
         )
         summary.to_excel(writer, index=False, sheet_name="Summary")
     return out.getvalue()
 
-
-def format_date(value):
-    dt = pd.to_datetime(value, errors="coerce")
-    if pd.isna(dt):
-        return "—"
-    return dt.strftime("%B %d, %Y").replace(" 0", " ")
-
-
 st.title("🎃 Halloween Horror Nights 35")
 st.caption("Universal Orlando • 10-minute wait-time tracker")
 
-df = load_data()
-
 with st.sidebar:
     st.header("Controls")
-
-    if st.button("🔄 Refresh data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+    if st.button("📡 Record snapshot now", use_container_width=True):
+        try:
+            count = collect_snapshot()
+            st.success(f"Recorded {count} matched houses.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not collect data: {e}")
 
     st.markdown("### Automatic collection")
     st.write(
-        "GitHub Actions collects a snapshot every 10 minutes while HHN is operating. "
-        "Monday and Tuesday are treated as closed nights, and records after midnight "
-        "until 6:00 AM remain part of the previous night's data."
+        "The included collector script records a snapshot every 10 minutes. "
+        "Keep it running during HHN to build the night's history."
     )
 
+    df = load_data()
     if not df.empty:
         st.download_button(
             "⬇️ Export CSV",
@@ -149,109 +169,53 @@ with st.sidebar:
             use_container_width=True,
         )
 
+df = load_data()
 
 if df.empty:
-    st.info("No snapshots yet. The automatic collector will add data when HHN is operating.")
+    st.info("No snapshots yet. Click **Record snapshot now** or start the 10-minute collector.")
 else:
-    now = today_local()
-    tonight = tonight_event_date()
+    latest_time = df["recorded_at"].max()
+    latest = df[df["recorded_at"] == latest_time].copy()
 
-    # Never display an old operating-night snapshot as if it were live on a closed day.
-    if is_closed_today():
-        st.warning(
-            f"🎃 **HHN is closed tonight.** There are no live wait times to display for "
-            f"{format_date(now.date())}. Historical wait-time data is still available below."
-        )
-        latest_time = None
-        latest = pd.DataFrame()
-    else:
-        tonight_rows = df[df["event_date"] == tonight].copy()
-        if tonight_rows.empty:
-            st.info(
-                f"🎃 **HHN is not collecting wait times yet for {format_date(tonight)}.** "
-                "Tonight's data will appear automatically when the collector runs."
-            )
-            latest_time = None
-            latest = pd.DataFrame()
-        else:
-            latest_time = tonight_rows["recorded_at"].max()
-            latest = tonight_rows[tonight_rows["recorded_at"] == latest_time].copy()
-            st.subheader(
-                f"Latest snapshot • {latest_time.strftime('%I:%M %p').lstrip('0')}"
+    st.subheader(f"Latest snapshot • {latest_time.strftime('%I:%M %p')}")
+
+    cols = st.columns(5)
+    for i, house in enumerate(HOUSE_MATCHES):
+        row = latest[latest["house"] == house]
+        with cols[i % 5]:
+            st.metric(
+                house,
+                "N/A" if row.empty or pd.isna(row.iloc[0]["wait_minutes"])
+                else f"{int(row.iloc[0]['wait_minutes'])} min",
+                "Open" if not row.empty and row.iloc[0]["is_open"] else "Closed / unavailable",
             )
 
-            cols = st.columns(5)
-            for i, house in enumerate(HOUSE_MATCHES):
-                row = latest[latest["house"] == house]
-                with cols[i % 5]:
-                    if row.empty:
-                        value = "N/A"
-                        delta = "No data"
-                    else:
-                        r = row.iloc[0]
-                        value = (
-                            "N/A"
-                            if pd.isna(r["wait_minutes"])
-                            else f"{int(r['wait_minutes'])} min"
-                        )
-                        delta = str(r["status"]) if str(r["status"]) else "Unknown"
-                    st.metric(house, value, delta)
-
-    st.divider()
-
-    st.subheader("📈 Wait times over time")
-    pivot = (
-        df.pivot_table(
-            index="recorded_at",
-            columns="house",
-            values="wait_minutes",
-            aggfunc="last",
-        )
-        .sort_index()
-    )
+    st.subheader("Wait times over time")
+    pivot = df.pivot_table(
+        index="recorded_at",
+        columns="house",
+        values="wait_minutes",
+        aggfunc="last",
+    ).sort_index()
     st.line_chart(pivot, height=500)
 
-    st.subheader("🔥 House summary")
+    st.subheader("House summary")
     summary = (
         df.dropna(subset=["wait_minutes"])
-        .groupby("house")["wait_minutes"]
-        .agg(
-            Samples="count",
-            Average="mean",
-            Minimum="min",
-            Maximum="max",
-        )
-        .round(1)
-        .sort_values("Average", ascending=False)
+          .groupby("house")["wait_minutes"]
+          .agg(
+              Samples="count",
+              Average="mean",
+              Minimum="min",
+              Maximum="max",
+          )
+          .round(1)
+          .sort_values("Average", ascending=False)
     )
     st.dataframe(summary, use_container_width=True)
 
-    st.subheader("📥 Export")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button(
-            "Download CSV",
-            export_csv(df),
-            "HHN_35_wait_times.csv",
-            "text/csv",
-            use_container_width=True,
-        )
-    with c2:
-        st.download_button(
-            "Download Excel",
-            export_xlsx(df),
-            "HHN_35_wait_times.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
     st.subheader("Raw data")
-    st.dataframe(
-        df.sort_values("recorded_at", ascending=False),
-        use_container_width=True,
-    )
+    st.dataframe(df.sort_values("recorded_at", ascending=False), use_container_width=True)
 
 st.divider()
-st.caption(
-    "Powered by Queue-Times.com. Data is collected by GitHub Actions every 10 minutes."
-)
+st.caption("Powered by Queue-Times.com. Verify current API terms/attribution before deploying publicly.")
