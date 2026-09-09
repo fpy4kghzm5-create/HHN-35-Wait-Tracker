@@ -144,10 +144,10 @@ def load_data():
         if df.empty:
             return df
 
-      pd.to_datetime(
-    df["recorded_at"],
-    format="mixed",
-    errors="coerce"
+          pd.to_datetime(
+        df["recorded_at"],
+        format="mixed",
+        errors="coerce"
 )
         )
 
