@@ -1,138 +1,113 @@
 import csv
-import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
 
-API_URL = "https://queue-times.com/parks/65/queue_times.json"
-LIVE_PAGE_URL = "https://queue-times.com/en-US/parks/65/queue_times"
-DATA_FILE = Path("data/waits.csv")
 TZ = ZoneInfo("America/New_York")
+DATA_FILE = Path("data/waits.csv")
+API_URL = "https://queue-times.com/parks/65/queue_times.json"
+LIVE_URL = "https://queue-times.com/en-US/parks/65/queue_times"
 
-HOUSES = [
-    "Cybergoria", "Evil Dead Burn", "H.R. Bloodengutz", "Hellraiser",
-    "INVASION", "Jack & Oddfellow", "MADLANDS", "Ozzy Osbourne",
-    "Sinners", "Stranger Things 5"
-]
-
-HEADERS = {
-    "User-Agent": "HHN-35-Wait-Tracker/1.0"
-}
+HOUSES = ["Cybergoria","Evil Dead Burn","H.R. Bloodengutz","Hellraiser","INVASION",
+          "Jack & Oddfellow","MADLANDS","Ozzy Osbourne","Sinners","Stranger Things 5"]
+HEADER = ["recorded_at","event_date","house","wait_minutes","status"]
 
 def norm(s):
-    return " ".join(str(s).lower().replace("’", "'").split())
+    return re.sub(r"\s+", " ", str(s or "").replace("’","'").replace("‘","'")).strip().lower()
 
-def api_rides(payload):
-    rides = []
-    for land in payload.get("lands", []) or []:
-        rides.extend(land.get("rides", []) or [])
-    rides.extend(payload.get("rides", []) or [])
-    return rides
+def event_date_for(dt):
+    return (dt - timedelta(days=1)).date() if dt.hour < 6 else dt.date()
+
+def operating(d):
+    return d.weekday() not in (0, 1)  # Monday/Tuesday closed
+
+def api_rides(data):
+    rides=[]
+    for land in data.get("lands", []):
+        rides.extend(land.get("rides",[]) or [])
+    rides.extend(data.get("rides",[]) or [])
+    seen=set(); result=[]
+    for r in rides:
+        key=(r.get("id"),r.get("name"))
+        if key not in seen:
+            seen.add(key); result.append(r)
+    return result
 
 def from_api():
-    r = requests.get(API_URL, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    payload = r.json()
-    rides = api_rides(payload)
-    found = {}
-    for ride in rides:
-        name = norm(ride.get("name", ""))
-        for house in HOUSES:
-            if house not in found and norm(house) in name:
-                found[house] = {
-                    "wait": int(ride.get("wait_time", 0) or 0),
-                    "status": "Open" if ride.get("is_open") else "Closed",
-                }
-    return found, len(rides)
-
-def from_live_page():
-    r = requests.get(LIVE_PAGE_URL, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    text = norm(" ".join(BeautifulSoup(r.text, "html.parser").stripped_strings))
-    found = {}
-    for house in HOUSES:
-        pos = text.find(norm(house))
-        if pos < 0:
-            continue
-        window = text[pos:pos + len(house) + 100]
-        match = re.search(r"(\d+)\s+mins?", window)
-        if match:
-            found[house] = {"wait": int(match.group(1)), "status": "Open"}
-        elif "closed" in window:
-            found[house] = {"wait": "", "status": "Closed"}
+    data=requests.get(API_URL,timeout=30).json()
+    rides=api_rides(data); found={}
+    for target in HOUSES:
+        matches=[r for r in rides if norm(target) in norm(r.get("name",""))]
+        if matches:
+            r=matches[0]
+            found[target]=(int(r.get("wait_time") or 0),"open" if r.get("is_open") else "closed")
+    print(f"API returned {len(rides)} rides; matched {len(found)}/{len(HOUSES)} houses.")
     return found
 
+def from_live_page():
+    r=requests.get(LIVE_URL,timeout=30,headers={"User-Agent":"Mozilla/5.0"})
+    text=BeautifulSoup(r.text,"html.parser").get_text(" ",strip=True)
+    found={}
+    for target in HOUSES:
+        i=norm(text).find(norm(target))
+        if i>=0:
+            m=re.search(r"(\d+)\s*(?:min|mins|minute|minutes)\b",text[i:i+500],re.I)
+            if m: found[target]=(int(m.group(1)),"open")
+    print(f"Live-page fallback matched {len(found)}/{len(HOUSES)} houses.")
+    return found
+
+def migrate_and_clean(rows):
+    kept=[]
+    for row in rows:
+        try:
+            ed=row.get("event_date","").strip()
+            if not ed:
+                ed=event_date_for(datetime.fromisoformat(row["recorded_at"])).isoformat()
+            if operating(datetime.fromisoformat(ed).date()):
+                kept.append({"recorded_at":row.get("recorded_at",""),"event_date":ed,
+                              "house":row.get("house",""),"wait_minutes":row.get("wait_minutes",""),
+                              "status":row.get("status","")})
+        except Exception:
+            pass
+    return kept
+
 def main():
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DATA_FILE.parent.mkdir(parents=True,exist_ok=True)
+    now=datetime.now(TZ); event_date=event_date_for(now)
 
-    # HHN 35 does not operate on Mondays or Tuesdays.
-    # Do not collect on those days, and remove any previously
-    # recorded Monday/Tuesday rows so they cannot pollute the dashboard.
-    now = datetime.now(TZ)
-    if now.weekday() in (0, 1):  # Monday=0, Tuesday=1
-        if DATA_FILE.exists() and DATA_FILE.stat().st_size > 0:
-            rows = []
-            with DATA_FILE.open("r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    try:
-                        row_dt = datetime.fromisoformat(row["recorded_at"])
-                        if row_dt.weekday() not in (0, 1):
-                            rows.append(row)
-                    except Exception:
-                        continue
+    existing=[]
+    if DATA_FILE.exists() and DATA_FILE.stat().st_size:
+        with DATA_FILE.open(newline="",encoding="utf-8") as f:
+            existing=list(csv.DictReader(f))
+    existing=migrate_and_clean(existing)
 
-            header = ["recorded_at", "house", "wait_minutes", "status"]
-            with DATA_FILE.open("w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=header)
-                writer.writeheader()
-                writer.writerows(rows)
-
-            print(f"HHN is closed on Monday/Tuesday. Removed non-operating-day records; kept {len(rows)} rows.")
-        else:
-            print("HHN is closed on Monday/Tuesday. No collection performed.")
+    if not operating(event_date):
+        with DATA_FILE.open("w",newline="",encoding="utf-8") as f:
+            w=csv.DictWriter(f,fieldnames=HEADER); w.writeheader(); w.writerows(existing)
+        print(f"HHN is closed for event date {event_date}. Cleaned non-operating-day records; no collection performed.")
         return
 
-    found = {}
-
-    try:
-        found, ride_count = from_api()
-        print(f"API returned {ride_count} rides; matched {len(found)}/10 houses.")
+    try: found=from_api()
     except Exception as e:
-        print("API error:", e)
-
-    if len(found) < len(HOUSES):
+        print(f"API failed: {e}"); found={}
+    if len(found)<len(HOUSES):
         try:
-            page = from_live_page()
-            for house, value in page.items():
-                found.setdefault(house, value)
-            print(f"Live-page fallback matched {len(page)}/10 houses.")
-        except Exception as e:
-            print("Live-page fallback error:", e)
+            for h,v in from_live_page().items(): found.setdefault(h,v)
+        except Exception as e: print(f"Live-page fallback failed: {e}")
 
-    timestamp = datetime.now(TZ).isoformat(timespec="seconds")
-    new_rows = []
-    for house in HOUSES:
-        if house in found:
-            v = found[house]
-            new_rows.append([timestamp, house, v["wait"], v["status"]])
-        else:
-            new_rows.append([timestamp, house, "", "Not found"])
+    new=[]
+    for h in HOUSES:
+        if h in found:
+            wait,status=found[h]
+            new.append({"recorded_at":now.isoformat(),"event_date":event_date.isoformat(),
+                         "house":h,"wait_minutes":wait,"status":status})
+    with DATA_FILE.open("w",newline="",encoding="utf-8") as f:
+        w=csv.DictWriter(f,fieldnames=HEADER); w.writeheader(); w.writerows(existing+new)
+    print(f"Recorded {len(new)}/{len(HOUSES)} houses for HHN night {event_date}.")
 
-    header = ["recorded_at", "house", "wait_minutes", "status"]
-    exists = DATA_FILE.exists() and DATA_FILE.stat().st_size > 0
-
-    with DATA_FILE.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not exists:
-            writer.writerow(header)
-        writer.writerows(new_rows)
-
-    print(f"Recorded {len(found)}/10 houses at {timestamp}.")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
