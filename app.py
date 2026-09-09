@@ -426,25 +426,35 @@ else:
         ).strip().lower()
 
         # Status takes priority over wait time.
+        # This is important because Queue-Times can report a
+        # delayed house with a wait_time of 0.
         if status in [
             "delayed",
-            "delay"
+            "delay",
+            "temporarily delayed",
+            "temporarily delay",
         ]:
 
             display_value = "Delayed"
 
         elif status in [
             "closed",
-            "close"
+            "close",
         ]:
 
             display_value = "Closed"
 
-        elif wait is not None:
+        elif wait is not None and wait > 0:
 
             display_value = (
                 f"{wait} min"
             )
+
+        elif wait == 0:
+
+            # A zero-minute value without an explicit open status
+            # should not be presented as a real wait time.
+            display_value = "—"
 
         elif status:
 
@@ -599,6 +609,8 @@ with c2:
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
+
 # ---------------------------------------------------------
 # FOOTER
 # ---------------------------------------------------------
