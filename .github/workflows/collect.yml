@@ -2,10 +2,10 @@ name: Collect HHN wait times
 
 on:
   schedule:
-    # Runs every 5 minutes.
-    # The job itself checks Eastern Time and only collects
-    # during the HHN season and operating hours.
-    - cron: "*/5 * * * *"
+    # Run every 5 minutes, offset from the top of the hour.
+    # GitHub recommends avoiding the start of the hour because
+    # scheduled workflows are more likely to be delayed then.
+    - cron: "2/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Check HHN date and time
@@ -52,6 +53,8 @@ jobs:
       - name: Check out repository
         if: steps.hhn_hours.outputs.collect == 'true'
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Python
         if: steps.hhn_hours.outputs.collect == 'true'
@@ -72,6 +75,13 @@ jobs:
         run: |
           git config user.name "HHN Wait Tracker"
           git config user.email "actions@github.com"
+
           git add data/waits.csv
-          git diff --cached --quiet || git commit -m "Update HHN wait times"
+
+          if git diff --cached --quiet; then
+            echo "No new data changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update HHN wait times"
           git push
