@@ -136,19 +136,20 @@ def get_event_date(value):
 
 @st.cache_data(ttl=30)
 def load_data():
-
     try:
-
         df = pd.read_csv(DATA_URL)
 
         if df.empty:
             return df
 
-          pd.to_datetime(
-        df["recorded_at"],
-        format="mixed",
-        errors="coerce"
-)
+        # IMPORTANT:
+        # The collector can produce timestamps both with and without
+        # fractional seconds. format="mixed" allows pandas to parse
+        # all of them instead of turning newer timestamps into NaT.
+        df["recorded_at"] = pd.to_datetime(
+            df["recorded_at"],
+            format="mixed",
+            errors="coerce"
         )
 
         df["wait_minutes"] = pd.to_numeric(
@@ -170,9 +171,9 @@ def load_data():
         # already supplied one. Otherwise calculate it from recorded_at.
         if "event_date" not in df.columns:
             df["event_date"] = df["recorded_at"].apply(get_event_date)
-
         else:
             calculated_dates = df["recorded_at"].apply(get_event_date)
+
             supplied_dates = pd.to_datetime(
                 df["event_date"],
                 errors="coerce"
@@ -186,7 +187,6 @@ def load_data():
         return df
 
     except Exception:
-
         return pd.DataFrame(
             columns=[
                 "recorded_at",
@@ -211,9 +211,7 @@ def format_timestamp(value):
     if pd.isna(value):
         return ""
 
-    return value.strftime(
-        "%m/%d/%Y %-I:%M %p"
-    )
+    return value.strftime("%m/%d/%Y %-I:%M %p")
 
 
 # ---------------------------------------------------------
@@ -221,7 +219,6 @@ def format_timestamp(value):
 # ---------------------------------------------------------
 
 def export_dataframe(df):
-
     export_df = df.copy()
 
     export_df["recorded_at"] = (
@@ -233,7 +230,6 @@ def export_dataframe(df):
 
 
 def excel_bytes(df):
-
     out = io.BytesIO()
 
     export_df = export_dataframe(df)
@@ -351,7 +347,6 @@ if not is_hhn_open(now):
     cards = []
 
     for house in HOUSES:
-
         cards.append(
             (house, "Closed", "closed")
         )
